@@ -107,6 +107,9 @@ static void for_each_open_file(struct task_struct *task,
  */
 static void osprd_process_request(osprd_info_t *d, struct request *req)
 {
+	unsigned long offset = req->sector * SECTOR_SIZE;
+	unsigned long nbytes = req->current_nr_sectors * SECTOR_SIZE;
+
 	if (!blk_fs_request(req)) {
 		end_request(req, 0);
 		return;
@@ -121,7 +124,30 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	// 'req->buffer' members, and the rq_data_dir() function.
 
 	// Your code here.
-	eprintk("Should process request...\n");
+
+	if ((offset + nbytes) > nsectors * SECTOR_SIZE) {
+		printk ("Requested size too large for reading");
+		return;
+	}
+	if (rq_data_dir(req) == WRITE) {
+		memcpy(
+			(void*)(d->data + offset), // destination
+			(void*)(req->buffer),   // source
+			nbytes // size to copy
+		); 
+	}
+	else if (rq_data_dir(req) == READ) {
+		memcpy(
+			(void*)(req->buffer),   // destination
+			(void*)(d->data + offset), // source
+			nbytes // size to copy
+		); 
+	}
+	else {
+		eprintk("Unknown Error\n");
+		end_request(req, 0);
+		return;
+	}
 
 	end_request(req, 1);
 }
