@@ -34,7 +34,7 @@
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("CS 111 RAM Disk");
 // EXERCISE: Pass your names into the kernel as the module's authors.
-MODULE_AUTHOR("Skeletor");
+MODULE_AUTHOR("Stephen Phillips and Andy Huang");
 
 #define OSPRD_MAJOR	222
 
@@ -52,6 +52,18 @@ typedef struct osprd_info {
 
 	osp_spinlock_t mutex;           // Mutex for synchronizing access to
 					// this block device
+
+	/*
+	Tickets are basically a count of written tasks. The ticket tail	shows how 
+	many want to be done, the ticket head shows how many have been done 
+	already. To wait for the next, we compare them for equality. That way, as 
+	long as there are less than ~4 billion tasks running simultaneously, we 
+	won't ever run out of tickets (well defined	wrap around behavior for 
+	unsigned ints). So every time we finish a write task, we increment 
+	ticket_head. Every time we get a new task, we increment ticket_tail, and 
+	give its value for that writing task to wait on. (This is a basic 
+	explaination of event counts and sequencers)
+	*/
 
 	unsigned ticket_head;		// Currently running ticket for
 					// the device lock
@@ -162,7 +174,13 @@ static int osprd_open(struct inode *inode, struct file *filp)
 	filp->f_flags |= O_SYNC;
 	return 0;
 }
-
+/*
+#define TICKET(sequencer) ++sequencer
+#define ADVANCE(event_count) event_count++
+#define READ(event_count) event_count
+#define AWAIT(q, event_count, value) \
+			wait_event_interruptible(q, (event_count == value))
+*/
 
 // This function is called when a /dev/osprdX file is finally closed.
 // (If the file descriptor was dup2ed, this function is called only when the
@@ -179,9 +197,17 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 
 		// Your code here.
 
-		// This line avoids compiler warnings; you may remove it.
-		(void) filp_writable, (void) d;
+		// Clear the locked flag
+		filp->f_flags &= ~(F_OSPRD_LOCKED);
 
+		// Increase the number of finished written tasks if needed
+		if(filp_writable) {
+			osp_spin_unlock(&d->mutex);
+			ticket_head++;
+			osp_spin_unlock(&d->mutex);
+		}
+
+		wake_up_all(&d->blockq);
 	}
 
 	return 0;
@@ -251,6 +277,9 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		eprintk("Attempting to acquire\n");
 		r = -ENOTTY;
 
+		// Will need the following:
+		// void finish_wait(wait_queue_head_t *q, wait_queue_t *wait);
+
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 
 		// EXERCISE: ATTEMPT to lock the ramdisk.
@@ -274,7 +303,19 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// you need, and return 0.
 
 		// Your code here (instead of the next line).
-		r = -ENOTTY;
+		// Clear the locked flag
+		filp->f_flags &= ~(F_OSPRD_LOCKED);
+
+		// Increase the number of finished written tasks if needed
+		if(filp_writable) {
+			osp_spin_unlock(&d->mutex);
+			ticket_head++;
+			osp_spin_unlock(&d->mutex);
+		}
+
+		wake_up_all(&d->blockq);
+
+		return 0;
 
 	} else
 		r = -ENOTTY; /* unknown command */
