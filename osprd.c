@@ -215,6 +215,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		}
 		else {
 			osp_spin_lock(&d->mutex);
+			d->ticket_head++;
 			d->read_locks--;
 			osp_spin_unlock(&d->mutex);	
 		}
@@ -239,12 +240,12 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 {
 	osprd_info_t *d = file2osprd(filp);	// device info
 	int r = 0;			// return value: initially 0
+	
+	int wait;
+	unsigned ticket;
 
 	// is file open for writing?
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
-
-	// This line avoids compiler warnings; you may remove it.
-	(void) filp_writable, (void) d;
 
 	// Set 'r' to the ioctl's return value: 0 on success, negative on error
 
@@ -290,9 +291,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		r = -ENOTTY;
 
 		// I think this is good ...
-		/*
-		unsigned ticket;
-		int wait;
 		if (filp_writable) {
 			
 			// Get the next ticket
@@ -309,9 +307,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 						&& d->read_locks == 0
 						&& d->write_locks == 0)
 				);
-			if (wait == -ERESTARTSYS) {
-				return -ERESTARTSYS;
-			}
 
 			osp_spin_lock(&d->mutex);
 			d->write_locks++;
@@ -334,10 +329,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 					(ticket == d->ticket_head && 
 						d->write_locks == 0)
 				);
-			if (wait == -ERESTARTSYS) {
-				return -ERESTARTSYS;
-			}
-
+			
 			osp_spin_lock(&d->mutex);
 			d->read_locks++;
 			filp->f_flags |= F_OSPRD_LOCKED;
@@ -345,6 +337,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		}
 
 		return 0;
+		/*
 		*/
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
@@ -360,9 +353,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		eprintk("Attempting to try acquire\n");
 		r = -ENOTTY;
 
-		/*
-		unsigned ticket;
-		int wait;
 		if (filp_writable) {
 			
 			// Get the next ticket
@@ -374,13 +364,17 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			// Wait for the ticket
 			if (ticket == d->ticket_head &&
 						d->read_locks == 0 &&
-						d->write_locks == 0)) {
+						d->write_locks == 0) {
 				osp_spin_lock(&d->mutex);
 				d->write_locks++;
 				filp->f_flags |= F_OSPRD_LOCKED;
 				osp_spin_unlock(&d->mutex);
 			}
 			else {
+				osp_spin_lock(&d->mutex);
+				d->ticket_head++;
+				osp_spin_unlock(&d->mutex);
+				
 				return -EBUSY;
 			}
 		}
@@ -394,18 +388,23 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
 			// Wait for the ticket
 			if (ticket == d->ticket_head && 
-						d->write_locks == 0)) {
+						d->write_locks == 0) {
 				osp_spin_lock(&d->mutex);
 				d->read_locks++;
 				filp->f_flags |= F_OSPRD_LOCKED;
 				osp_spin_unlock(&d->mutex);
 			}
 			else {
+				osp_spin_lock(&d->mutex);
+				d->ticket_head++;
+				osp_spin_unlock(&d->mutex);
+				
 				return -EBUSY;
 			}
 		}
 
 		return 0;
+		/*
 		*/
 
 	} else if (cmd == OSPRDIOCRELEASE) {
@@ -420,7 +419,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Your code here (instead of the next line).
 		// Check to make sure has lock
 		if (!(filp->f_flags & F_OSPRD_LOCKED)) {
-			return -EINTVAL;
+			return -EINVAL;
 		}
 
 		// Clear the locked flag
@@ -435,6 +434,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		}
 		else {
 			osp_spin_lock(&d->mutex);
+			d->ticket_head++;
 			d->read_locks--;
 			osp_spin_unlock(&d->mutex);
 		}
