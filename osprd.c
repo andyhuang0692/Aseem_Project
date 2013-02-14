@@ -199,7 +199,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 	if (filp) {
 		osprd_info_t *d = file2osprd(filp);
 		int filp_writable = filp->f_mode & FMODE_WRITE;
-
+		pid_t pid = current->pid;
 
 		// EXERCISE: If the user closes a ramdisk file that holds
 		// a lock, release the lock.  Also wake up blocked processes
@@ -230,7 +230,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 			osp_spin_unlock(&d->mutex);	
 		}
 
-		remove_node (&d->lock_list, filp);
+		remove_node (&d->lock_list, pid);
 
 		wake_up_all(&d->blockq);
 	}
@@ -252,6 +252,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 {
 	osprd_info_t *d = file2osprd(filp);	// device info
 		
+	pid_t pid;
 	int wait;
 	unsigned ticket;
 
@@ -261,8 +262,10 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
 	if (cmd == OSPRDIOCACQUIRE) {
 
+		pid = current->pid;
 		//int i;
-		if (check_in_list(d->lock_list, filp)) {
+		printk("filp: %d\n", pid);
+		if (check_in_list(d->lock_list, pid)) {
 			eprintk("DEADLOCK!!!");
 			return -EDEADLK;
 		}
