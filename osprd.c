@@ -16,6 +16,7 @@
 
 #include "spinlock.h"
 #include "osprd.h"
+#include "llist.h"
 
 /* The size of an OSPRD sector. */
 #define SECTOR_SIZE	512
@@ -82,7 +83,7 @@ typedef struct osprd_info {
 
 	// To detect who has the lock
 	// TODO: Get this working
-	// filp current_lock_holder;
+	node_t lock_list;
 
 	// The following elements are used internally; you don't need
 	// to understand them.
@@ -194,9 +195,11 @@ static int osprd_open(struct inode *inode, struct file *filp)
 // last copy is closed.)
 static int osprd_close_last(struct inode *inode, struct file *filp)
 {
+
 	if (filp) {
 		osprd_info_t *d = file2osprd(filp);
 		int filp_writable = filp->f_mode & FMODE_WRITE;
+
 
 		// EXERCISE: If the user closes a ramdisk file that holds
 		// a lock, release the lock.  Also wake up blocked processes
@@ -227,6 +230,8 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 			osp_spin_unlock(&d->mutex);	
 		}
 
+		remove_node (&d->lock_list, filp);
+
 		wake_up_all(&d->blockq);
 	}
 
@@ -255,6 +260,16 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
 
 	if (cmd == OSPRDIOCACQUIRE) {
+
+		//int i;
+		if (check_in_list(d->lock_list, filp)) {
+			eprintk("DEADLOCK!!!");
+			return -EDEADLK;
+		}
+
+		/*for (i = 0; i < NOSPRD; i++) {
+			;
+		}*/
 
 		// EXERCISE: Lock the ramdisk.
 		//
@@ -375,6 +390,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			wake_up_all(&d->blockq);
 		}
 
+		insert_node (&d->lock_list, filp, d->read_locks, d->write_locks);
+
 		return 0;
 		/*
 		*/
@@ -395,9 +412,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			ticket = d->ticket_tail;
 			d->ticket_tail++;
 			osp_spin_unlock(&d->mutex);
-
-			eprintk("After write ticket with ticket %d ticket head %d and ticket tail %d\n", ticket, d->ticket_head, d->ticket_tail);
-
 
 			// Wait for the ticket
 			if (ticket == d->ticket_head &&
@@ -498,7 +512,7 @@ static void osprd_setup(osprd_info_t *d)
 	/* Add code here if you add fields to osprd_info_t. */
 	d->read_locks = 0;
 	d->write_locks = 0;
-
+	d->lock_list = 0;
 }
 
 
