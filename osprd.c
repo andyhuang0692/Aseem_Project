@@ -253,6 +253,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 	osprd_info_t *d = file2osprd(filp);	// device info
 		
 	pid_t pid;
+	node_t check;
 	int wait;
 	unsigned ticket;
 
@@ -264,8 +265,10 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
 		pid = current->pid;
 		//int i;
-		printk("filp: %d\n", pid);
-		if (check_in_list(d->lock_list, pid)) {
+		eprintk("filp: %d\n", pid);
+		check = check_in_list(d->lock_list, pid);
+		eprintk("check is: %d", (int)check);
+		if (check) {
 			eprintk("DEADLOCK!!!");
 			return -EDEADLK;
 		}
@@ -393,7 +396,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			wake_up_all(&d->blockq);
 		}
 
-		insert_node (&d->lock_list, filp, d->read_locks, d->write_locks);
+		insert_node (&d->lock_list, pid, d->read_locks, d->write_locks);
 
 		return 0;
 		/*
