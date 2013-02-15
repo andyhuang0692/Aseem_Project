@@ -95,8 +95,9 @@ typedef struct osprd_info {
 
 #define NOSPRD 4
 static osprd_info_t osprds[NOSPRD];
-
-
+osp_spinlock_t g_mutex;  // Mutex for synchronizing access to
+					// all the block devices to prevent deadlock
+char g_mutex_init = 0; // Checks if the g_mutex has been initialized
 // Declare useful helper functions
 
 /*
@@ -214,7 +215,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		// Clear the locked flag
 		filp->f_flags &= ~(F_OSPRD_LOCKED);
 
-		// Increase the number of finished written tasks if needed
+		// Increase the number of finished written tasks atomically if needed
 		if(filp_writable) {
 			osp_spin_lock(&d->mutex);
 			d->ticket_head++;
@@ -224,14 +225,17 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		else {
 			osp_spin_lock(&d->mutex);
 			d->ticket_head++;
-			if(d->read_locks > 1)
-				eprintk("There are %d reads\n", d->read_locks);
 			d->read_locks--;
 			osp_spin_unlock(&d->mutex);	
 		}
 
+		// This needs to be atomic to avoid nodes removing themselves
+		// While others are checking the same list
+		osp_spin_lock(&g_mutex);
 		remove_node (&d->lock_list, pid);
+		osp_spin_unlock(&g_mutex);
 
+		// We're done with the lock, notify everyone
 		wake_up_all(&d->blockq);
 	}
 
@@ -254,7 +258,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		
 	pid_t pid;
 	node_t check;
-	int wait;
+	int wait, i;
 	unsigned ticket;
 
 
@@ -263,19 +267,57 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
 	if (cmd == OSPRDIOCACQUIRE) {
 
+		// The process id trying to get this lock is the unique identifier
+		// in our list
 		pid = current->pid;
-		//int i;
-		eprintk("filp: %d\n", pid);
+
+		// Check if this pid has already tried to get a lock on this device
 		check = check_in_list(d->lock_list, pid);
-		eprintk("check is: %d", (int)check);
 		if (check) {
-			eprintk("DEADLOCK!!!");
 			return -EDEADLK;
 		}
 
-		/*for (i = 0; i < NOSPRD; i++) {
-			;
-		}*/
+		/*
+		This whole section is to prevent deadlock. The global lock is 
+		necessary to avoid raceconditions, like processes getting inserted
+		into the list after we've already checked it. This is a huge 
+		unfortunate bottleneck. I does prevent deadlock, however.
+		*/
+		osp_spin_lock(&g_mutex);
+		for (i = 0; i < NOSPRD; i++) {
+			if(d == &osprds[i]) {  //Checks if this our own device
+				continue;
+			}
+			else {
+				node_t traversal = d->lock_list; //Traversal set to beginning of our lock linked list
+				node_t start; // The starting position of our pid in the other list
+				check = NULL;
+
+				start = check_in_list(osprds[i].lock_list, pid);
+				// We only care if our is also has another lock in this node
+				if(start == NULL)
+					continue;
+
+				while(traversal != NULL) {
+					// Only care about stuff after our pid
+					check = check_in_list(start, traversal->pid);
+
+					// We must make sure that our pid does not hold
+					//  a lock that would block anything in another queue
+					if(check != NULL) {
+						osp_spin_unlock(&g_mutex);
+						return -EDEADLK;
+					}
+					traversal = traversal->next;   
+				}
+			}
+		}
+
+		// It doesn't cause deadlock, so me must insert it into the list so
+		// that others can check if this process will cause deadlock
+		insert_node (&d->lock_list, pid, d->read_locks, d->write_locks);
+		
+		osp_spin_unlock(&g_mutex);
 
 		// EXERCISE: Lock the ramdisk.
 		//
@@ -312,7 +354,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// (Some of these operations are in a critical section and must
 		// be protected by a spinlock; which ones?)
 
-		// I think this is good ...
 		if (filp_writable) {
 			
 			// Get the next ticket
@@ -330,7 +371,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 						&& d->write_locks == 0)
 			
 				);
-			
+
+			// Interupt handling
 			if (wait != 0) {
 				// Wait until we have the ticket
 				// If we increment too early, another process could wait 
@@ -365,10 +407,12 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			wait = 
 				wait_event_interruptible(
 					d->blockq, 
+					// We don't need to check for other read tasks, take note
 					(ticket == d->ticket_head && 
 						d->write_locks == 0)
 				);
 
+			// Interrupt handling
 			if (wait != 0) {
 				// Wait until we have the ticket
 				// If we increment too early, another process could wait 
@@ -393,10 +437,10 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			filp->f_flags |= F_OSPRD_LOCKED;
 			osp_spin_unlock(&d->mutex);
 
+			// Since the next task might be a read task, we wake everyone
 			wake_up_all(&d->blockq);
 		}
 
-		insert_node (&d->lock_list, pid, d->read_locks, d->write_locks);
 
 		return 0;
 		/*
@@ -419,7 +463,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			d->ticket_tail++;
 			osp_spin_unlock(&d->mutex);
 
-			// Wait for the ticket
+			// Check if we can get the ticket
 			if (ticket == d->ticket_head &&
 						d->read_locks == 0 &&
 						d->write_locks == 0) {
@@ -429,6 +473,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				osp_spin_unlock(&d->mutex);
 			}
 			else {
+				// Clean up the tickets, make sure they are back to
+				// where they should be
 				osp_spin_lock(&d->mutex);
 				d->ticket_head++;
 				osp_spin_unlock(&d->mutex);
@@ -444,7 +490,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			d->ticket_tail++;
 			osp_spin_unlock(&d->mutex);
 
-			// Wait for the ticket
+			// Check if we can get the ticket
 			if (ticket == d->ticket_head && 
 						d->write_locks == 0) {
 				osp_spin_lock(&d->mutex);
@@ -452,9 +498,12 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				filp->f_flags |= F_OSPRD_LOCKED;
 				osp_spin_unlock(&d->mutex);
 
+				// Wake up everyone for the same reasons
 				wake_up_all(&d->blockq);
 			}
 			else {
+				// Clean up the tickets, make sure they are back to
+				// where they should be
 				osp_spin_lock(&d->mutex);
 				d->ticket_head++;
 				osp_spin_unlock(&d->mutex);
@@ -462,10 +511,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				return -EBUSY;
 			}
 		}
-
+		// Success
 		return 0;
-		/*
-		*/
 
 	} else if (cmd == OSPRDIOCRELEASE) {
 
@@ -485,7 +532,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Clear the locked flag
 		filp->f_flags &= ~(F_OSPRD_LOCKED);
 
-		// Increase the number of finished written tasks if needed
+		// Increment the current job and increment the number of finished
+		// writing/reading tasks
 		if(filp_writable) {
 			osp_spin_lock(&d->mutex);
 			d->ticket_head++;
@@ -499,6 +547,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			osp_spin_unlock(&d->mutex);
 		}
 
+		// We're finished, notify everyone
 		wake_up_all(&d->blockq);
 
 		return 0;
@@ -519,6 +568,11 @@ static void osprd_setup(osprd_info_t *d)
 	d->read_locks = 0;
 	d->write_locks = 0;
 	d->lock_list = 0;
+	// For the global lock
+	if (!g_mutex_init) {
+		osp_spin_lock_init(&g_mutex);
+		g_mutex_init = 1;
+	}
 }
 
 
